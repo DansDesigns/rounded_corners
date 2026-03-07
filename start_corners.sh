@@ -1,7 +1,7 @@
 #!/bin/bash
 if [ ! -d "venv" ]; then
-    python3 -m venv venv
+    python3 -m venv corner-venv
 fi
-source venv/bin/activate
+source corner-venv/bin/activate
 pip install pillow screeninfo
 python3 rounded_corners.py "$@"
