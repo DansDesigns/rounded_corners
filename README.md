@@ -29,25 +29,16 @@ The first time you run start_corners.bat, it will automatically drop a shortcut 
 Every subsequent login it will launch silently in the background.
 ```
 
-Linux — systemd user service:
+Linux — .desktop autostart entry:
 ```
-nano ~/.config/systemd/user/rounded-corners.service
-```
-rounded-corners.service:
-```
-[Unit]
-Description=Rounded Corners
-
-[Service]
-ExecStart=/bin/bash /path/to/start_corners.sh
-Environment=DISPLAY=:0
-
-[Install]
-WantedBy=default.target
-```
-
-Then enable it:
-```
-systemctl --user enable rounded-corners
-systemctl --user start rounded-corners
+mkdir -p ~/.config/autostart
+cat > ~/.config/autostart/rounded-corners.desktop << EOF
+[Desktop Entry]
+Type=Application
+Name=Rounded Corners
+Exec=/bin/bash /home/$USER/rounded_corners/start_corners.sh
+Hidden=false
+NoDisplay=false
+X-GNOME-Autostart-enabled=true
+EOF
 ```
