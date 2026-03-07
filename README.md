@@ -1,5 +1,7 @@
-# Universal Rounded Corners - for Linux & Windows
+# Universal Rounded Corners 
+for Linux & Windows
 
+![](https://github.com/DansDesigns/rounded_corners/blob/main/corners.png)
 
 Draws pure-black rounded-corner overlays on every connected monitor.
 Always on top, variable arc radius - identical to the macOS corner effect.
