@@ -35,7 +35,7 @@ Every subsequent login it will launch silently in the background.
 
 Linux:
 ```
-install-corners.sh adds a .desktop launcher to /usr/bin & /home/$USER/.config/autostart
+install-corners.sh installs to /usr/bin & adds an autostart in $HOME/.config/autostart, along with an icon.
 
 
 python3 /usr/bin/rounded_corners
