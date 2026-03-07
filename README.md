@@ -3,7 +3,7 @@ for Linux & Windows
 
 
 Draws pure-black rounded-corner overlays on every connected monitor.
-Always on top, variable arc radius — identical to the macOS corner effect.
+Always on top, variable arc radius - identical to the macOS corner effect.
 
 
 Each corner tile is a solid black square with a quarter-circle cut out of
@@ -25,7 +25,7 @@ The first time you run start_corners.bat, it will automatically drop a shortcut 
 Every subsequent login it will launch silently in the background.
 ```
 
-Linux — systemd user service:
+Linux:
 ```
 nano ~/.config/systemd/user/rounded-corners.service
 ```
