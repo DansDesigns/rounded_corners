@@ -1,16 +1,35 @@
 #!/bin/bash
 cd "$(dirname "$0")"
 
-if [ ! -d "venv" ]; then
-    python3 -m venv venv
-fi
-source venv/bin/activate
+echo "Installing Rounded Corners..."
+
+# Install dependencies system-wide
 sudo pip3 install pillow screeninfo pygame python-xlib --break-system-packages
 
+# Copy script to /usr/bin and make executable
 sudo cp rounded_corners.py /usr/bin/rounded_corners
-sudo cp start_corners.sh /usr/bin/rounded_corners_start
 sudo chmod +x /usr/bin/rounded_corners
-sudo chmod +x /usr/bin/rounded_corners_start
 
-sudo cp corners.png /usr/share/icons/hicolor/64x64/apps/corners.png
+# Copy icon if it doesnt exist
+if [ -f "corners.png" ]; then
+    sudo mkdir -p /usr/share/icons/hicolor/64x64/apps
+    sudo cp corners.png /usr/share/icons/hicolor/64x64/apps/corners.png
+fi
 
+# Create .desktop entry
+mkdir -p "$HOME/.local/share/applications"
+cat > "$HOME/.local/share/applications/rounded_corners.desktop" << EOF
+[Desktop Entry]
+Type=Application
+Name=Rounded Corners
+Comment=Rounded corner overlay for all monitors
+Exec=python3 /usr/bin/rounded_corners
+Icon=corners
+Terminal=false
+Categories=Utility;
+StartupNotify=false
+EOF
+
+echo "Done! You can now launch it with:"
+echo "python3 /usr/bin/rounded_corners"
+echo "or if running qtile, add to qtile autostart config: subprocess.Popen(['python3', '/usr/bin/rounded_corners'])"
