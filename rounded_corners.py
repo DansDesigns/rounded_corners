@@ -210,10 +210,21 @@ for y in range(arc):
 xwin.shape_mask(shape.SO.Set, shape.SK.Bounding, 0, 0, bitmap)
 gc.free()
 
-# Always on top
-net_wm_state       = xdpy.intern_atom("_NET_WM_STATE")
-net_wm_state_above = xdpy.intern_atom("_NET_WM_STATE_ABOVE")
-xwin.change_property(net_wm_state, xdpy.intern_atom("ATOM"), 32, [net_wm_state_above])
+# Set window type to DOCK — this:
+#   1. places the window above the top panel (no strut reservation needed)
+#   2. hides it from taskbar and task switcher automatically
+net_wm_window_type      = xdpy.intern_atom("_NET_WM_WINDOW_TYPE")
+net_wm_window_type_dock = xdpy.intern_atom("_NET_WM_WINDOW_TYPE_DOCK")
+xwin.change_property(net_wm_window_type, xdpy.intern_atom("ATOM"),
+                     32, [net_wm_window_type_dock])
+
+# Also set always-on-top and skip taskbar/pager for extra compatibility
+net_wm_state            = xdpy.intern_atom("_NET_WM_STATE")
+net_wm_state_above      = xdpy.intern_atom("_NET_WM_STATE_ABOVE")
+net_wm_state_skip_tb    = xdpy.intern_atom("_NET_WM_STATE_SKIP_TASKBAR")
+net_wm_state_skip_pager = xdpy.intern_atom("_NET_WM_STATE_SKIP_PAGER")
+xwin.change_property(net_wm_state, xdpy.intern_atom("ATOM"), 32,
+                     [net_wm_state_above, net_wm_state_skip_tb, net_wm_state_skip_pager])
 xdpy.sync()
 
 clock = pygame.time.Clock()
