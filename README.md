@@ -7,7 +7,6 @@ Always on top, variable arc radius - identical to the macOS corner effect.
 
 Each corner tile is a solid black square with a quarter-circle cut out of
 the inner-facing corner (the one pointing toward the screen centre).
-![](https://github.com/DansDesigns/rounded_corners/blob/main/win.png)
 ![](https://github.com/DansDesigns/rounded_corners/blob/main/linux.png)
 
 # To Install:
