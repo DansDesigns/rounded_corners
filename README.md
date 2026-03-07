@@ -10,12 +10,6 @@ Each corner tile is a solid black square with a quarter-circle cut out of
 the inner-facing corner (the one pointing toward the screen centre).
 
 
-Requirements:
-```
-pip install pillow screeninfo
-```
-
-
 Usage:
 ```
 python rounded_corners.py            # default arc radius (30 px)
