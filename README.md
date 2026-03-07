@@ -1,5 +1,4 @@
-# Universal Rounded Corners
-for Linux & Windows
+# Universal Rounded Corners - for Linux & Windows
 
 
 Draws pure-black rounded-corner overlays on every connected monitor.
@@ -10,13 +9,22 @@ Each corner tile is a solid black square with a quarter-circle cut out of
 the inner-facing corner (the one pointing toward the screen centre).
 
 
+# To Install:
 
 
-Usage:
+clone or download this repo & unzip.
+
+on Windows:
 ```
-python rounded_corners.py            # default arc radius (30 px)
-python rounded_corners.py --arc 60   # custom arc radius
+run start_corners.bat
 ```
+on Linux:
+```
+open terminal
+run "chmod +x install-corners.sh"
+run "./install-corners.sh
+```
+
 Auto-Start:
 
 Windows:
@@ -27,5 +35,5 @@ Every subsequent login it will launch silently in the background.
 
 Linux:
 ```
-python3 /usr/bin/rounded_corners
+install-corners.sh installs to /usr/bin & adds an autostart in $HOME/.config/autostart, along with an icon.
 ```
