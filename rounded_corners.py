@@ -139,7 +139,7 @@ wy     = int(sys.argv[4])
 
 from PIL import Image, ImageDraw
 import pygame
-from Xlib import display as Xdisplay
+from Xlib import display as Xdisplay, X
 from Xlib.ext import shape
 
 def build_corner_rgba(arc, corner):
@@ -158,47 +158,56 @@ def build_corner_rgba(arc, corner):
     return img
 
 os.environ["SDL_VIDEO_WINDOW_POS"] = f"{wx},{wy}"
-os.environ["SDL_VIDEO_X11_WMCLASS"] = "rounded_corner"
+
+# ── Step 1: set all WM hints via Xlib BEFORE pygame maps the window ───────────
+# We open a direct Xlib connection and create+configure a window ourselves,
+# then hand its ID to SDL via SDL_WINDOWID so pygame renders into it.
+xdpy       = Xdisplay.Display()
+screen_num = xdpy.get_default_screen()
+xscreen    = xdpy.screen(screen_num)
+root       = xscreen.root
+
+# Create the X window manually so we control it before it is mapped
+xwin = root.create_window(
+    wx, wy, arc, arc, 0,
+    xscreen.root_depth,
+    X.InputOutput,
+    X.CopyFromParent,
+    background_pixel=xscreen.black_pixel,
+    event_mask=X.ExposureMask | X.StructureNotifyMask,
+    override_redirect=True,   # bypass WM completely — no decorations, no taskbar
+)
+
+# Set window type + state hints before mapping
+ATOM = xdpy.intern_atom("ATOM")
+xwin.change_property(xdpy.intern_atom("_NET_WM_WINDOW_TYPE"), ATOM, 32,
+                     [xdpy.intern_atom("_NET_WM_WINDOW_TYPE_DOCK")])
+xwin.change_property(xdpy.intern_atom("_NET_WM_STATE"), ATOM, 32, [
+    xdpy.intern_atom("_NET_WM_STATE_ABOVE"),
+    xdpy.intern_atom("_NET_WM_STATE_SKIP_TASKBAR"),
+    xdpy.intern_atom("_NET_WM_STATE_SKIP_PAGER"),
+])
+
+# Map (show) the window now that hints are set
+xwin.map()
+xdpy.sync()
+
+# ── Step 2: tell SDL to render into our pre-configured X window ───────────────
+os.environ["SDL_WINDOWID"] = str(xwin.id)
 
 pygame.init()
 screen = pygame.display.set_mode((arc, arc), pygame.NOFRAME)
-pygame.display.set_caption("")
 pygame.event.pump()
 pygame.display.flip()
+time.sleep(0.3)
 
 img  = build_corner_rgba(arc, corner)
 surf = pygame.image.fromstring(img.tobytes(), img.size, "RGBA").convert_alpha()
 
-# Wait for window to be fully mapped
-time.sleep(0.4)
-
-# Apply Xlib shape mask
-xdpy    = Xdisplay.Display()
-xwin_id = pygame.display.get_wm_info()["window"]
-
-# Poll until window geometry is valid
-xwin = None
-for _ in range(30):
-    try:
-        xwin = xdpy.create_resource_object("window", xwin_id)
-        xwin.get_geometry()
-        break
-    except Exception:
-        xwin = None
-        time.sleep(0.1)
-
-if xwin is None:
-    print(f"ERROR: could not get window geometry for corner {corner}", flush=True)
-    sys.exit(1)
-
-# Build 1-bit mask pixmap using the window's own depth-1 pixmap
-alpha_px = img.split()[3].load()
-
-# Use XLib to create bitmap on the correct screen
-screen_num = xdpy.get_default_screen()
-root = xdpy.screen(screen_num).root
-bitmap = root.create_pixmap(arc, arc, 1)
-gc = bitmap.create_gc(foreground=0, background=0)
+# ── Step 3: apply X11 shape mask to cut the arc ───────────────────────────────
+alpha_px   = img.split()[3].load()
+bitmap     = root.create_pixmap(arc, arc, 1)
+gc         = bitmap.create_gc(foreground=0, background=0)
 bitmap.fill_rectangle(gc, 0, 0, arc, arc)
 gc.change(foreground=1)
 
@@ -209,22 +218,6 @@ for y in range(arc):
 
 xwin.shape_mask(shape.SO.Set, shape.SK.Bounding, 0, 0, bitmap)
 gc.free()
-
-# Set window type to DOCK — this:
-#   1. places the window above the top panel (no strut reservation needed)
-#   2. hides it from taskbar and task switcher automatically
-net_wm_window_type      = xdpy.intern_atom("_NET_WM_WINDOW_TYPE")
-net_wm_window_type_dock = xdpy.intern_atom("_NET_WM_WINDOW_TYPE_DOCK")
-xwin.change_property(net_wm_window_type, xdpy.intern_atom("ATOM"),
-                     32, [net_wm_window_type_dock])
-
-# Also set always-on-top and skip taskbar/pager for extra compatibility
-net_wm_state            = xdpy.intern_atom("_NET_WM_STATE")
-net_wm_state_above      = xdpy.intern_atom("_NET_WM_STATE_ABOVE")
-net_wm_state_skip_tb    = xdpy.intern_atom("_NET_WM_STATE_SKIP_TASKBAR")
-net_wm_state_skip_pager = xdpy.intern_atom("_NET_WM_STATE_SKIP_PAGER")
-xwin.change_property(net_wm_state, xdpy.intern_atom("ATOM"), 32,
-                     [net_wm_state_above, net_wm_state_skip_tb, net_wm_state_skip_pager])
 xdpy.sync()
 
 clock = pygame.time.Clock()
@@ -288,7 +281,7 @@ def run_linux(monitors, arc):
 def main():
     parser = argparse.ArgumentParser(
         description="Rounded-corner overlay for every connected monitor.")
-    parser.add_argument("--arc", type=int, default=30,
+    parser.add_argument("--arc", type=int, default=40,
                         help="Corner arc radius in pixels (default: 30)")
     args = parser.parse_args()
     arc  = max(5, args.arc)
