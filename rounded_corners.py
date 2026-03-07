@@ -127,73 +127,105 @@ def run_windows(monitors, arc):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  LINUX — pygame + python-xlib shape mask
+#  LINUX — one subprocess per corner (avoids pygame single-display limitation)
 # ══════════════════════════════════════════════════════════════════════════════
 
-def run_linux_corner(wx, wy, arc, corner):
-    """Each corner runs in its own thread with its own pygame window."""
-    os.environ["SDL_VIDEO_WINDOW_POS"] = f"{wx},{wy}"
+LINUX_CORNER_CODE = """
+import sys, os, time
+arc    = int(sys.argv[1])
+corner = sys.argv[2]
+wx     = int(sys.argv[3])
+wy     = int(sys.argv[4])
 
-    import pygame
-    from Xlib import display as Xdisplay
-    from Xlib.ext import shape
+from PIL import Image, ImageDraw
+import pygame
+from Xlib import display as Xdisplay
+from Xlib.ext import shape
 
-    pygame.init()
-    screen = pygame.display.set_mode((arc, arc), pygame.NOFRAME)
-    pygame.display.set_caption("")
+def build_corner_rgba(arc, corner):
+    size = arc
+    img  = Image.new("RGBA", (size, size), (0, 0, 0, 255))
+    draw = ImageDraw.Draw(img)
+    cfg  = {
+        "tl": ((size, size), 180, 270),
+        "tr": ((0,    size), 270, 360),
+        "bl": ((size, 0   ),  90, 180),
+        "br": ((0,    0   ),   0,  90),
+    }
+    (cx, cy), start, end = cfg[corner]
+    bbox = (cx - arc, cy - arc, cx + arc, cy + arc)
+    draw.pieslice(bbox, start=start, end=end, fill=(0, 0, 0, 0))
+    return img
 
-    img  = build_corner_rgba(arc, corner)
-    surf = pygame.image.fromstring(img.tobytes(), img.size, "RGBA").convert_alpha()
+os.environ["SDL_VIDEO_WINDOW_POS"] = f"{wx},{wy}"
+os.environ["SDL_VIDEO_X11_WMCLASS"] = "rounded_corner"
 
-    # ── wait for pygame window to be fully mapped before touching Xlib ────────
-    import time
-    pygame.event.pump()
+pygame.init()
+screen = pygame.display.set_mode((arc, arc), pygame.NOFRAME)
+pygame.display.set_caption("")
+pygame.event.pump()
+pygame.display.flip()
+
+img  = build_corner_rgba(arc, corner)
+surf = pygame.image.fromstring(img.tobytes(), img.size, "RGBA").convert_alpha()
+
+# Wait for window to be fully mapped
+time.sleep(0.4)
+
+# Apply Xlib shape mask
+xdpy    = Xdisplay.Display()
+xwin_id = pygame.display.get_wm_info()["window"]
+
+# Poll until window geometry is valid
+xwin = None
+for _ in range(30):
+    try:
+        xwin = xdpy.create_resource_object("window", xwin_id)
+        xwin.get_geometry()
+        break
+    except Exception:
+        xwin = None
+        time.sleep(0.1)
+
+if xwin is None:
+    print(f"ERROR: could not get window geometry for corner {corner}", flush=True)
+    sys.exit(1)
+
+# Build 1-bit mask pixmap using the window's own depth-1 pixmap
+alpha_px = img.split()[3].load()
+
+# Use XLib to create bitmap on the correct screen
+screen_num = xdpy.get_default_screen()
+root = xdpy.screen(screen_num).root
+bitmap = root.create_pixmap(arc, arc, 1)
+gc = bitmap.create_gc(foreground=0, background=0)
+bitmap.fill_rectangle(gc, 0, 0, arc, arc)
+gc.change(foreground=1)
+
+for y in range(arc):
+    for x in range(arc):
+        if alpha_px[x, y] > 0:
+            bitmap.fill_rectangle(gc, x, y, 1, 1)
+
+xwin.shape_mask(shape.SO.Set, shape.SK.Bounding, 0, 0, bitmap)
+gc.free()
+
+# Always on top
+net_wm_state       = xdpy.intern_atom("_NET_WM_STATE")
+net_wm_state_above = xdpy.intern_atom("_NET_WM_STATE_ABOVE")
+xwin.change_property(net_wm_state, xdpy.intern_atom("ATOM"), 32, [net_wm_state_above])
+xdpy.sync()
+
+clock = pygame.time.Clock()
+while True:
+    for event in pygame.event.get():
+        if event.type == pygame.QUIT:
+            sys.exit(0)
+    screen.fill((0, 0, 0))
+    screen.blit(surf, (0, 0))
     pygame.display.flip()
-    time.sleep(0.5)
-
-    # ── apply X11 shape mask ──────────────────────────────────────────────────
-    xdpy    = Xdisplay.Display()
-    xwin_id = pygame.display.get_wm_info()["window"]
-    xwin    = xdpy.create_resource_object("window", xwin_id)
-
-    # Poll until the window geometry is valid (avoids BadWindow race condition)
-    for _ in range(20):
-        try:
-            xwin.get_geometry()
-            break
-        except Exception:
-            time.sleep(0.1)
-            xwin = xdpy.create_resource_object("window", xwin_id)
-
-    bitmap = xdpy.screen().root.create_pixmap(arc, arc, 1)
-    gc     = bitmap.create_gc(foreground=0, background=0)
-    bitmap.fill_rectangle(gc, 0, 0, arc, arc)
-    gc.change(foreground=1)
-
-    alpha_px = img.split()[3].load()
-    for y in range(arc):
-        for x in range(arc):
-            if alpha_px[x, y] > 0:
-                bitmap.fill_rectangle(gc, x, y, 1, 1)
-
-    xwin.shape_mask(shape.SO.Set, shape.SK.Bounding, 0, 0, bitmap)
-
-    # ── always on top ─────────────────────────────────────────────────────────
-    net_wm_state       = xdpy.intern_atom("_NET_WM_STATE")
-    net_wm_state_above = xdpy.intern_atom("_NET_WM_STATE_ABOVE")
-    xwin.change_property(net_wm_state, xdpy.intern_atom("ATOM"),
-                         32, [net_wm_state_above])
-    xdpy.sync()
-
-    clock = pygame.time.Clock()
-    while True:
-        for event in pygame.event.get():
-            if event.type == pygame.QUIT:
-                return
-        screen.fill((0, 0, 0))
-        screen.blit(surf, (0, 0))
-        pygame.display.flip()
-        clock.tick(30)
+    clock.tick(30)
+"""
 
 
 def run_linux(monitors, arc):
@@ -205,7 +237,14 @@ def run_linux(monitors, arc):
         print("ERROR: Linux requires:  pip install pygame python-xlib")
         sys.exit(1)
 
-    threads = []
+    import subprocess, tempfile
+
+    # Write the corner worker script to a temp file
+    tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False)
+    tmp.write(LINUX_CORNER_CODE)
+    tmp.close()
+
+    procs = []
     for (mx, my, mw, mh) in monitors:
         print(f"  Monitor {mw}x{mh} @ ({mx},{my})")
         positions = {
@@ -215,19 +254,19 @@ def run_linux(monitors, arc):
             "br": (mx + mw - arc, my + mh - arc),
         }
         for corner, (wx, wy) in positions.items():
-            t = threading.Thread(
-                target=run_linux_corner,
-                args=(wx, wy, arc, corner),
-                daemon=True
+            p = subprocess.Popen(
+                [sys.executable, tmp.name, str(arc), corner, str(wx), str(wy)]
             )
-            t.start()
-            threads.append(t)
+            procs.append(p)
 
     print("\nOverlays active. Ctrl-C to quit.")
     try:
-        for t in threads:
-            t.join()
+        for p in procs:
+            p.wait()
     except KeyboardInterrupt:
+        for p in procs:
+            p.terminate()
+        os.unlink(tmp.name)
         sys.exit(0)
 
 
