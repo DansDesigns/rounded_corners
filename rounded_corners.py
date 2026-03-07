@@ -145,10 +145,25 @@ def run_linux_corner(wx, wy, arc, corner):
     img  = build_corner_rgba(arc, corner)
     surf = pygame.image.fromstring(img.tobytes(), img.size, "RGBA").convert_alpha()
 
+    # ── wait for pygame window to be fully mapped before touching Xlib ────────
+    import time
+    pygame.event.pump()
+    pygame.display.flip()
+    time.sleep(0.5)
+
     # ── apply X11 shape mask ──────────────────────────────────────────────────
     xdpy    = Xdisplay.Display()
     xwin_id = pygame.display.get_wm_info()["window"]
     xwin    = xdpy.create_resource_object("window", xwin_id)
+
+    # Poll until the window geometry is valid (avoids BadWindow race condition)
+    for _ in range(20):
+        try:
+            xwin.get_geometry()
+            break
+        except Exception:
+            time.sleep(0.1)
+            xwin = xdpy.create_resource_object("window", xwin_id)
 
     bitmap = xdpy.screen().root.create_pixmap(arc, arc, 1)
     gc     = bitmap.create_gc(foreground=0, background=0)
@@ -223,8 +238,8 @@ def run_linux(monitors, arc):
 def main():
     parser = argparse.ArgumentParser(
         description="Rounded-corner overlay for every connected monitor.")
-    parser.add_argument("--arc", type=int, default=40,
-                        help="Corner arc radius in pixels (default: 40)")
+    parser.add_argument("--arc", type=int, default=30,
+                        help="Corner arc radius in pixels (default: 30)")
     args = parser.parse_args()
     arc  = max(5, args.arc)
 
