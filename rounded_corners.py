@@ -1,5 +1,5 @@
 """
-rounded_corners.py
+Dan's rounded_corners.py
 ------------------
 Draws pure-black rounded-corner overlays on every connected monitor.
 Always on top, variable arc radius — identical to the macOS corner effect.
@@ -132,7 +132,8 @@ class MonitorCorners:
 def main():
     parser = argparse.ArgumentParser(
         description="Rounded-corner overlay for every connected monitor.")
-    parser.add_argument("--arc", type=int, default=30,
+    # DEFAULT SIZE:
+    parser.add_argument("--arc", type=int, default=40,
                         help="Corner arc radius in pixels (default: 30)")
     args = parser.parse_args()
     arc = max(5, args.arc)

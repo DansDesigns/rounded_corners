@@ -16,4 +16,6 @@ if not exist "%SHORTCUT%" (
     echo Startup shortcut created - will now run on every login!
 )
 
-python rounded_corners.py %*
+:: Use pythonw.exe to run with no terminal window
+:: The process will keep running even after this bat closes
+start "" venv\Scripts\pythonw.exe rounded_corners.py %*
