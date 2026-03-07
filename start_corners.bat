@@ -3,7 +3,7 @@ if not exist venv (
     python -m venv venv
 )
 call venv\Scripts\activate
-pip install pillow screeninfo
+pip install pillow screeninfo --quiet
 
 :: Add to startup folder automatically (only once)
 set STARTUP=%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup
