@@ -5,24 +5,12 @@ if [ ! -d "venv" ]; then
     python3 -m venv venv
 fi
 source venv/bin/activate
-pip install pillow screeninfo pygame python-xlib -q
+sudo pip3 install pillow screeninfo pygame python-xlib --break-system-packages
 
-# Create autostart entry if it doesn't exist yet
-DESKTOP_FILE="$HOME/.config/autostart/rounded-corners.desktop"
-SCRIPT_PATH="$(realpath "$0")"
+sudo cp rounded_corners.py /usr/bin/rounded_corners
+sudo cp start_corners.sh /usr/bin/rounded_corners_start
+sudo chmod +x /usr/bin/rounded_corners
+sudo chmod +x /usr/bin/rounded_corners_start
 
-if [ ! -f "$DESKTOP_FILE" ]; then
-    mkdir -p "$HOME/.config/autostart"
-    cat > "$DESKTOP_FILE" << DESKTOP
-[Desktop Entry]
-Type=Application
-Name=Rounded Corners
-Exec=/bin/bash $SCRIPT_PATH
-Hidden=false
-NoDisplay=false
-X-GNOME-Autostart-enabled=true
-DESKTOP
-    echo "Autostart entry created at $DESKTOP_FILE"
-fi
+sudo cp corners.png /usr/share/icons/hicolor/64x64/apps/corners.png
 
-python3 rounded_corners.py "$@"
