@@ -1,11 +1,8 @@
 """
-Dan's rounded_corners.py
+rounded_corners.py
 ------------------
 Draws pure-black rounded-corner overlays on every connected monitor.
 Always on top, variable arc radius — identical to the macOS corner effect.
-
-Each corner tile is a solid black square with a quarter-circle cut out of
-the inner-facing corner (the one pointing toward the screen centre).
 
 Requirements:
     pip install pillow screeninfo
@@ -18,6 +15,9 @@ Usage:
 import tkinter as tk
 import argparse
 import sys
+import platform
+
+IS_WINDOWS = platform.system() == "Windows"
 
 try:
     from PIL import Image, ImageDraw, ImageTk
@@ -40,25 +40,11 @@ def get_monitors_fallback(root):
     return [(0, 0, root.winfo_screenwidth(), root.winfo_screenheight())]
 
 
-# Transparency key colour — virtually black, used so tkinter can mask it out.
-TKEY = "#010101"
+TKEY     = "#010101"
 TKEY_RGB = (1, 1, 1)
 
 
-def build_corner_image(arc: int, corner: str):
-    """
-    Returns a PhotoImage of size (arc x arc).
-
-    The screen edge sits at one corner of the tile; the circle is centred
-    exactly there with radius = arc.  We cut the quarter-pie that faces the
-    interior of the screen, leaving a solid black L-shape whose inner edge
-    follows a perfect arc.
-
-        tl -> screen edge at (0,    0   )  cut: 0-90 deg
-        tr -> screen edge at (size, 0   )  cut: 90-180 deg
-        bl -> screen edge at (0,    size)  cut: 270-360 deg
-        br -> screen edge at (size, size)  cut: 180-270 deg
-    """
+def build_corner_image(arc, corner):
     size = arc
     img  = Image.new("RGBA", (size, size), (0, 0, 0, 255))
     draw = ImageDraw.Draw(img)
@@ -73,21 +59,24 @@ def build_corner_image(arc: int, corner: str):
     bbox = (cx - arc, cy - arc, cx + arc, cy + arc)
     draw.pieslice(bbox, start=start, end=end, fill=(0, 0, 0, 0))
 
-    # Replace transparent pixels with key colour so tkinter can mask them
-    rgb   = img.convert("RGB")
-    pix   = rgb.load()
-    alpha = img.split()[3].load()
-    for y in range(size):
-        for x in range(size):
-            if alpha[x, y] == 0:
-                pix[x, y] = TKEY_RGB
-
-    return ImageTk.PhotoImage(rgb)
+    if IS_WINDOWS:
+        # Key-colour trick: replace transparent pixels with #010101
+        # so tkinter's -transparentcolor can mask them out
+        rgb   = img.convert("RGB")
+        pix   = rgb.load()
+        alpha = img.split()[3].load()
+        for y in range(size):
+            for x in range(size):
+                if alpha[x, y] == 0:
+                    pix[x, y] = TKEY_RGB
+        return ImageTk.PhotoImage(rgb)
+    else:
+        # Linux/macOS: pass the full RGBA image; the window uses
+        # its alpha channel for per-pixel transparency
+        return ImageTk.PhotoImage(img)
 
 
 class MonitorCorners:
-    """Creates four always-on-top corner windows for one monitor."""
-
     def __init__(self, root, mx, my, mw, mh, arc):
         self.root = root
         self.wins = []
@@ -106,11 +95,25 @@ class MonitorCorners:
             win.overrideredirect(True)
             win.attributes("-topmost", True)
             win.geometry(f"{arc}x{arc}+{wx}+{wy}")
-            win.attributes("-transparentcolor", TKEY)
-            win.configure(bg=TKEY)
 
-            canvas = tk.Canvas(win, width=arc, height=arc,
-                               bg=TKEY, highlightthickness=0)
+            if IS_WINDOWS:
+                win.attributes("-transparentcolor", TKEY)
+                win.configure(bg=TKEY)
+                canvas = tk.Canvas(win, width=arc, height=arc,
+                                   bg=TKEY, highlightthickness=0)
+            else:
+                # Linux: transparent window background via -alpha isn't
+                # per-pixel, so we use a black bg and rely on the RGBA image
+                win.configure(bg="black")
+                win.attributes("-alpha", 1.0)
+                # Tell the compositor this window wants ARGB visual
+                try:
+                    win.attributes("-transparent", True)
+                except tk.TclError:
+                    pass
+                canvas = tk.Canvas(win, width=arc, height=arc,
+                                   bg="black", highlightthickness=0)
+
             canvas.pack()
             canvas.create_image(0, 0, anchor="nw", image=photo)
             canvas._ref = photo  # prevent garbage collection
@@ -132,9 +135,8 @@ class MonitorCorners:
 def main():
     parser = argparse.ArgumentParser(
         description="Rounded-corner overlay for every connected monitor.")
-    # DEFAULT SIZE:
     parser.add_argument("--arc", type=int, default=40,
-                        help="Corner arc radius in pixels (default: 30)")
+                        help="Corner arc radius in pixels (default: 25)")
     args = parser.parse_args()
     arc = max(5, args.arc)
 
