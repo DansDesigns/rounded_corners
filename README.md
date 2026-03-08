@@ -17,13 +17,13 @@ clone or download this repo & unzip.
 
 on Windows:
 ```
-run start_corners.bat
+run: start_corners.bat
 ```
 on Linux:
 ```
 open terminal
-run "chmod +x install-corners.sh"
-run "./install-corners.sh
+run: chmod +x install-corners.sh
+run: ./install-corners.sh
 ```
 
 Auto-Start:
