@@ -2,7 +2,7 @@
 rounded_corners.py
 ------------------
 Draws pure-black rounded-corner overlays on every connected monitor.
-Always on top, variable arc radius — identical to the macOS corner effect.
+Always on top, variable arc radius - identical to the macOS corner effect.
 
 Windows : uses tkinter + transparentcolor (no extra deps beyond pillow/screeninfo)
 Linux   : uses pygame + python-xlib shape extension for true per-pixel cutout
@@ -40,7 +40,7 @@ except ImportError:
         return None
 
 
-# ── shared image builder ───────────────────────────────────────────────────────
+# ======================= shared image builder =======================
 
 def build_corner_rgba(arc, corner):
     """Return an RGBA PIL image: black corner shape, transparent cutout."""
@@ -60,7 +60,7 @@ def build_corner_rgba(arc, corner):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  WINDOWS — tkinter + transparentcolor
+#  WINDOWS - tkinter + transparentcolor
 # ══════════════════════════════════════════════════════════════════════════════
 
 def run_windows(monitors, arc):
@@ -127,7 +127,7 @@ def run_windows(monitors, arc):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  LINUX — one subprocess per corner (avoids pygame single-display limitation)
+#  LINUX - one subprocess per corner (avoids pygame single-display limitation)
 # ══════════════════════════════════════════════════════════════════════════════
 
 LINUX_CORNER_CODE = """
@@ -159,7 +159,7 @@ def build_corner_rgba(arc, corner):
 
 os.environ["SDL_VIDEO_WINDOW_POS"] = f"{wx},{wy}"
 
-# ── Step 1: set all WM hints via Xlib BEFORE pygame maps the window ───────────
+# ======================= Step 1: set all WM hints via Xlib BEFORE pygame maps the window =======================
 # We open a direct Xlib connection and create+configure a window ourselves,
 # then hand its ID to SDL via SDL_WINDOWID so pygame renders into it.
 xdpy       = Xdisplay.Display()
@@ -192,7 +192,7 @@ xwin.change_property(xdpy.intern_atom("_NET_WM_STATE"), ATOM, 32, [
 xwin.map()
 xdpy.sync()
 
-# ── Step 2: tell SDL to render into our pre-configured X window ───────────────
+# ======================= Step 2: tell SDL to render into our pre-configured X window =======================
 os.environ["SDL_WINDOWID"] = str(xwin.id)
 
 pygame.init()
@@ -204,7 +204,7 @@ time.sleep(0.3)
 img  = build_corner_rgba(arc, corner)
 surf = pygame.image.fromstring(img.tobytes(), img.size, "RGBA").convert_alpha()
 
-# ── Step 3: apply X11 shape mask to cut the arc ───────────────────────────────
+# ======================= Step 3: apply X11 shape mask to cut the arc =======================
 alpha_px   = img.split()[3].load()
 bitmap     = root.create_pixmap(arc, arc, 1)
 gc         = bitmap.create_gc(foreground=0, background=0)
