@@ -1,5 +1,5 @@
 # Universal Rounded Corners 
-for Linux & Windows
+for ANY system that runs python 3.x
 
 ![](https://github.com/DansDesigns/rounded_corners/blob/main/corners.png)
 
