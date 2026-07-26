@@ -5,15 +5,17 @@ Draws pure-black rounded-corner overlays on every connected monitor.
 Always on top, variable arc radius - identical to the macOS corner effect.
 
 Windows : uses tkinter + transparentcolor (no extra deps beyond pillow/screeninfo)
-Linux   : uses pygame + python-xlib shape extension for true per-pixel cutout
+Linux   : uses raw Xlib + the X SHAPE extension, in a single lightweight process.
+          No pygame/SDL2 - the corners are static and never redrawn, so a full
+          game-loop library was never actually needed here.
 
 Requirements:
     pip install pillow screeninfo
     # Linux only:
-    pip install pygame python-xlib
+    pip install python-xlib
 
 Usage:
-    python rounded_corners.py            # default arc radius (30 px)
+    python rounded_corners.py            # default arc radius (40 px)
     python rounded_corners.py --arc 60   # custom arc radius
 """
 
@@ -21,7 +23,8 @@ import argparse
 import sys
 import platform
 import os
-import threading
+import signal
+import time
 
 IS_WINDOWS = platform.system() == "Windows"
 
@@ -61,6 +64,7 @@ def build_corner_rgba(arc, corner):
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  WINDOWS - tkinter + transparentcolor
+#  (unchanged: this path was already a single, light process)
 # ══════════════════════════════════════════════════════════════════════════════
 
 def run_windows(monitors, arc):
@@ -116,7 +120,7 @@ def run_windows(monitors, arc):
                 w.lift()
             except tk.TclError:
                 pass
-        root.after(500, pulse)
+        root.after(2000, pulse)  # 2s is plenty for re-asserting topmost
 
     pulse()
 
@@ -127,128 +131,46 @@ def run_windows(monitors, arc):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  LINUX - one subprocess per corner (avoids pygame single-display limitation)
+#  LINUX - single process, raw Xlib + SHAPE extension, no pygame/SDL2
 # ══════════════════════════════════════════════════════════════════════════════
 
-LINUX_CORNER_CODE = """
-import sys, os, time
-arc    = int(sys.argv[1])
-corner = sys.argv[2]
-wx     = int(sys.argv[3])
-wy     = int(sys.argv[4])
+def _build_shape_mask(root, arc, corner):
+    """Build a 1-bit X pixmap mask (the SHAPE extension's bounding mask) from
+    the PIL alpha channel for one corner. Built once, reused for every monitor."""
+    img   = build_corner_rgba(arc, corner)
+    alpha = img.split()[3].load()
 
-from PIL import Image, ImageDraw
-import pygame
-from Xlib import display as Xdisplay, X
-from Xlib.ext import shape
-
-def build_corner_rgba(arc, corner):
-    size = arc
-    img  = Image.new("RGBA", (size, size), (0, 0, 0, 255))
-    draw = ImageDraw.Draw(img)
-    cfg  = {
-        "tl": ((size, size), 180, 270),
-        "tr": ((0,    size), 270, 360),
-        "bl": ((size, 0   ),  90, 180),
-        "br": ((0,    0   ),   0,  90),
-    }
-    (cx, cy), start, end = cfg[corner]
-    bbox = (cx - arc, cy - arc, cx + arc, cy + arc)
-    draw.pieslice(bbox, start=start, end=end, fill=(0, 0, 0, 0))
-    return img
-
-os.environ["SDL_VIDEO_WINDOW_POS"] = f"{wx},{wy}"
-
-# ======================= Step 1: set all WM hints via Xlib BEFORE pygame maps the window =======================
-# We open a direct Xlib connection and create+configure a window ourselves,
-# then hand its ID to SDL via SDL_WINDOWID so pygame renders into it.
-xdpy       = Xdisplay.Display()
-screen_num = xdpy.get_default_screen()
-xscreen    = xdpy.screen(screen_num)
-root       = xscreen.root
-
-# Create the X window manually so we control it before it is mapped
-xwin = root.create_window(
-    wx, wy, arc, arc, 0,
-    xscreen.root_depth,
-    X.InputOutput,
-    X.CopyFromParent,
-    background_pixel=xscreen.black_pixel,
-    event_mask=X.ExposureMask | X.StructureNotifyMask,
-    override_redirect=True,   # bypass WM completely — no decorations, no taskbar
-)
-
-# Set window type + state hints before mapping
-ATOM = xdpy.intern_atom("ATOM")
-xwin.change_property(xdpy.intern_atom("_NET_WM_WINDOW_TYPE"), ATOM, 32,
-                     [xdpy.intern_atom("_NET_WM_WINDOW_TYPE_DOCK")])
-xwin.change_property(xdpy.intern_atom("_NET_WM_STATE"), ATOM, 32, [
-    xdpy.intern_atom("_NET_WM_STATE_ABOVE"),
-    xdpy.intern_atom("_NET_WM_STATE_SKIP_TASKBAR"),
-    xdpy.intern_atom("_NET_WM_STATE_SKIP_PAGER"),
-])
-
-# Map (show) the window now that hints are set
-xwin.map()
-xdpy.sync()
-
-# ======================= Step 2: tell SDL to render into our pre-configured X window =======================
-os.environ["SDL_WINDOWID"] = str(xwin.id)
-
-pygame.init()
-screen = pygame.display.set_mode((arc, arc), pygame.NOFRAME)
-pygame.event.pump()
-pygame.display.flip()
-time.sleep(0.3)
-
-img  = build_corner_rgba(arc, corner)
-surf = pygame.image.fromstring(img.tobytes(), img.size, "RGBA").convert_alpha()
-
-# ======================= Step 3: apply X11 shape mask to cut the arc =======================
-alpha_px   = img.split()[3].load()
-bitmap     = root.create_pixmap(arc, arc, 1)
-gc         = bitmap.create_gc(foreground=0, background=0)
-bitmap.fill_rectangle(gc, 0, 0, arc, arc)
-gc.change(foreground=1)
-
-for y in range(arc):
-    for x in range(arc):
-        if alpha_px[x, y] > 0:
-            bitmap.fill_rectangle(gc, x, y, 1, 1)
-
-xwin.shape_mask(shape.SO.Set, shape.SK.Bounding, 0, 0, bitmap)
-gc.free()
-xdpy.sync()
-
-clock = pygame.time.Clock()
-while True:
-    for event in pygame.event.get():
-        if event.type == pygame.QUIT:
-            sys.exit(0)
-    screen.fill((0, 0, 0))
-    screen.blit(surf, (0, 0))
-    pygame.display.flip()
-    clock.tick(30)
-"""
+    bitmap = root.create_pixmap(arc, arc, 1)
+    gc = bitmap.create_gc(foreground=0, background=0)
+    bitmap.fill_rectangle(gc, 0, 0, arc, arc)
+    gc.change(foreground=1)
+    for y in range(arc):
+        for x in range(arc):
+            if alpha[x, y] > 0:
+                bitmap.fill_rectangle(gc, x, y, 1, 1)
+    gc.free()
+    return bitmap
 
 
 def run_linux(monitors, arc):
     try:
-        import pygame
-        from Xlib import display as Xdisplay
+        from Xlib import display as Xdisplay, X
         from Xlib.ext import shape
     except ImportError:
-        print("ERROR: Linux requires:  pip install pygame python-xlib")
+        print("ERROR: Linux requires:  pip install python-xlib")
         sys.exit(1)
 
-    import subprocess, tempfile
+    xdpy       = Xdisplay.Display()
+    screen_num = xdpy.get_default_screen()
+    xscreen    = xdpy.screen(screen_num)
+    root       = xscreen.root
+    ATOM       = xdpy.intern_atom("ATOM")
 
-    # Write the corner worker script to a temp file
-    tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False)
-    tmp.write(LINUX_CORNER_CODE)
-    tmp.close()
+    # The 4 corner shapes are identical regardless of which monitor they sit
+    # on, so build each mask exactly once and reuse it for every monitor.
+    masks = {c: _build_shape_mask(root, arc, c) for c in ("tl", "tr", "bl", "br")}
 
-    procs = []
+    windows = []
     for (mx, my, mw, mh) in monitors:
         print(f"  Monitor {mw}x{mh} @ ({mx},{my})")
         positions = {
@@ -258,20 +180,42 @@ def run_linux(monitors, arc):
             "br": (mx + mw - arc, my + mh - arc),
         }
         for corner, (wx, wy) in positions.items():
-            p = subprocess.Popen(
-                [sys.executable, tmp.name, str(arc), corner, str(wx), str(wy)]
+            win = root.create_window(
+                wx, wy, arc, arc, 0,
+                xscreen.root_depth,
+                X.InputOutput,
+                X.CopyFromParent,
+                background_pixel=xscreen.black_pixel,  # server auto-paints this,
+                event_mask=X.ExposureMask,              # so no redraw code needed
+                override_redirect=True,
             )
-            procs.append(p)
+            win.change_property(xdpy.intern_atom("_NET_WM_WINDOW_TYPE"), ATOM, 32,
+                                 [xdpy.intern_atom("_NET_WM_WINDOW_TYPE_DOCK")])
+            win.change_property(xdpy.intern_atom("_NET_WM_STATE"), ATOM, 32, [
+                xdpy.intern_atom("_NET_WM_STATE_ABOVE"),
+                xdpy.intern_atom("_NET_WM_STATE_SKIP_TASKBAR"),
+                xdpy.intern_atom("_NET_WM_STATE_SKIP_PAGER"),
+            ])
+            win.map()
+            win.shape_mask(shape.SO.Set, shape.SK.Bounding, 0, 0, masks[corner])
+            windows.append(win)
 
-    print("\nOverlays active. Ctrl-C to quit.")
+    xdpy.sync()
+    print(f"\n{len(windows)} static corner overlays active in a single process "
+          f"(no pygame). Ctrl-C to quit.")
+
     try:
-        for p in procs:
-            p.wait()
+        signal.pause()  # blocks at ~0% CPU until a signal (e.g. Ctrl-C) arrives
+    except AttributeError:
+        # signal.pause() isn't available on every platform - fall back safely
+        try:
+            while True:
+                time.sleep(3600)
+        except KeyboardInterrupt:
+            pass
     except KeyboardInterrupt:
-        for p in procs:
-            p.terminate()
-        os.unlink(tmp.name)
-        sys.exit(0)
+        pass
+    sys.exit(0)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -282,7 +226,7 @@ def main():
     parser = argparse.ArgumentParser(
         description="Rounded-corner overlay for every connected monitor.")
     parser.add_argument("--arc", type=int, default=40,
-                        help="Corner arc radius in pixels (default: 30)")
+                        help="Corner arc radius in pixels (default: 40)")
     args = parser.parse_args()
     arc  = max(5, args.arc)
 

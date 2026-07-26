@@ -4,7 +4,7 @@ cd "$(dirname "$0")"
 echo "Installing Rounded Corners..."
 
 # Install dependencies system-wide
-sudo pip3 install pillow screeninfo pygame python-xlib --break-system-packages
+sudo pip3 install pillow screeninfo python-xlib --break-system-packages
 
 # Copy script to /usr/bin and make executable
 sudo cp rounded_corners.py /usr/bin/rounded_corners
