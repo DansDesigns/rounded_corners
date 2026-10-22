@@ -4,10 +4,11 @@ rounded_corners.py
 Draws pure-black rounded-corner overlays on every connected monitor.
 Always on top, variable arc radius - identical to the macOS corner effect.
 
-Windows : uses tkinter + transparentcolor (no extra deps beyond pillow/screeninfo)
+Windows : uses tkinter + transparentcolor and a Win32 window-stacking event hook.
 Linux   : uses raw Xlib + the X SHAPE extension, in a single lightweight process.
-          No pygame/SDL2 - the corners are static and never redrawn, so a full
-          game-loop library was never actually needed here.
+          The corner masks remain static, but stacking events immediately return
+          them to the top if Freehand or another overlay raises itself.
+          No pygame/SDL2 or continuous repaint loop.
 
 Requirements:
     pip install pillow screeninfo
@@ -64,7 +65,8 @@ def build_corner_rgba(arc, corner):
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  WINDOWS - tkinter + transparentcolor
-#  (unchanged: this path was already a single, light process)
+#  Watch z-order events so Freehand's regular HWND_TOPMOST reassertion cannot
+#  hide the corners for up to two seconds between the old pulse() calls.
 # ══════════════════════════════════════════════════════════════════════════════
 
 def run_windows(monitors, arc):
@@ -113,21 +115,88 @@ def run_windows(monitors, arc):
             canvas._ref = photo
             all_wins.append(win)
 
-    def pulse():
+    # Freehand (and other apps) can call SetWindowPos(HWND_TOPMOST) every
+    # fraction of a second. A 2-second poll makes the masks visibly disappear.
+    # Instead, WinEventHook notifies us immediately when OTHER processes change
+    # stacking order, and Tk's existing GUI thread restores the mask windows.
+    pending_restack = False
+
+    def raise_corners():
+        nonlocal pending_restack
+        pending_restack = False
         for w in all_wins:
             try:
-                w.attributes("-topmost", True)
-                w.lift()
+                if w.winfo_exists():
+                    w.attributes("-topmost", True)
+                    w.lift()
             except tk.TclError:
                 pass
-        root.after(2000, pulse)  # 2s is plenty for re-asserting topmost
+
+    def request_restack():
+        nonlocal pending_restack
+        if pending_restack:
+            return
+        pending_restack = True
+        try:
+            root.after_idle(raise_corners)
+        except tk.TclError:
+            pending_restack = False
+
+    win_event_hook = None
+    win_event_callback = None
+    user32 = None
+    try:
+        import ctypes
+        from ctypes import wintypes
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        # EVENT_OBJECT_REORDER: a window was raised/lowered.
+        # EVENT_OBJECT_SHOW: another program just created/shown an overlay.
+        # WINEVENT_SKIPOWNPROCESS avoids an infinite feedback loop from lift().
+        callback_type = ctypes.WINFUNCTYPE(
+            None, wintypes.HANDLE, wintypes.DWORD, wintypes.HWND,
+            ctypes.c_long, ctypes.c_long, wintypes.DWORD, wintypes.DWORD)
+        user32.SetWinEventHook.argtypes = (
+            wintypes.DWORD, wintypes.DWORD, wintypes.HMODULE, callback_type,
+            wintypes.DWORD, wintypes.DWORD, wintypes.DWORD)
+        user32.SetWinEventHook.restype = wintypes.HANDLE
+        user32.UnhookWinEvent.argtypes = (wintypes.HANDLE,)
+        user32.UnhookWinEvent.restype = wintypes.BOOL
+
+        @callback_type
+        def on_stacking_change(_hook, _event, _hwnd, object_id,
+                               child_id, _thread, _when):
+            if object_id == 0 and child_id == 0:  # OBJID_WINDOW/CHILDID_SELF
+                request_restack()
+
+        win_event_callback = on_stacking_change  # keep CFUNCTYPE alive
+        win_event_hook = user32.SetWinEventHook(
+            0x8002, 0x8004, None, win_event_callback, 0, 0,
+            0x0000 | 0x0002)  # OUTOFCONTEXT | SKIPOWNPROCESS
+        if not win_event_hook:
+            print("Windows stacking hook unavailable; using fast topmost check.")
+    except (OSError, AttributeError, ValueError, TypeError) as exc:
+        print("Windows stacking hook unavailable:", exc)
+
+    def pulse():
+        # The event hook is the normal route (effectively immediate). A slow
+        # backup check also covers applications which don't emit reorder events.
+        raise_corners()
+        try:
+            root.after(900 if win_event_hook else 100, pulse)
+        except tk.TclError:
+            pass
 
     pulse()
-
     try:
         root.mainloop()
     except KeyboardInterrupt:
-        sys.exit(0)
+        pass
+    finally:
+        if win_event_hook and user32 is not None:
+            try:
+                user32.UnhookWinEvent(win_event_hook)
+            except (OSError, AttributeError):
+                pass
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -166,6 +235,13 @@ def run_linux(monitors, arc):
     root       = xscreen.root
     ATOM       = xdpy.intern_atom("ATOM")
 
+    # python-xlib exposes SHAPE constants as ShapeSet/ShapeBounding on some
+    # releases and SO.Set/SK.Bounding on others. Accept both (no new dependency).
+    shape_operation_set = getattr(getattr(shape, "SO", None), "Set",
+                                  getattr(shape, "ShapeSet", 0))
+    shape_region_bounding = getattr(getattr(shape, "SK", None), "Bounding",
+                                    getattr(shape, "ShapeBounding", 0))
+
     # The 4 corner shapes are identical regardless of which monitor they sit
     # on, so build each mask exactly once and reuse it for every monitor.
     masks = {c: _build_shape_mask(root, arc, c) for c in ("tl", "tr", "bl", "br")}
@@ -189,6 +265,10 @@ def run_linux(monitors, arc):
                 event_mask=X.ExposureMask,              # so no redraw code needed
                 override_redirect=True,
             )
+            # Identify these unmanaged windows for desktop tools/debugging.
+            # They remain override-redirect, so Qtile cannot take control.
+            win.set_wm_name("Freehand Rounded Corners")
+            win.set_wm_class("rounded_corners", "FreehandRoundedCorners")
             win.change_property(xdpy.intern_atom("_NET_WM_WINDOW_TYPE"), ATOM, 32,
                                  [xdpy.intern_atom("_NET_WM_WINDOW_TYPE_DOCK")])
             win.change_property(xdpy.intern_atom("_NET_WM_STATE"), ATOM, 32, [
@@ -197,25 +277,53 @@ def run_linux(monitors, arc):
                 xdpy.intern_atom("_NET_WM_STATE_SKIP_PAGER"),
             ])
             win.map()
-            win.shape_mask(shape.SO.Set, shape.SK.Bounding, 0, 0, masks[corner])
+            win.shape_mask(shape_operation_set, shape_region_bounding, 0, 0, masks[corner])
             windows.append(win)
 
+    # Subscribe to restacks of TOP-LEVEL X11 windows. In particular, Freehand
+    # uses XRaiseWindow about eight times a second to remain visible above
+    # Alternix's launcher; without this listener it ends up covering the corner
+    # masks. X11 reports each foreign restack as ConfigureNotify on the root.
+    # Selecting this mask is per-client and does not interfere with Qtile's masks.
+    root.change_attributes(event_mask=X.SubstructureNotifyMask)
+    corner_ids = {win.id for win in windows}
     xdpy.sync()
-    print(f"\n{len(windows)} static corner overlays active in a single process "
-          f"(no pygame). Ctrl-C to quit.")
+    print(f"\n{len(windows)} rounded corner masks active above desktop overlays "
+          "(event-driven, no continuous redraw). Ctrl-C to quit.")
+
+    def handle_stacking_event(event):
+        """Return True only if another root-level window changed z-order."""
+        if event.type not in (X.ConfigureNotify, X.MapNotify):
+            return False
+        affected = getattr(event, "window", None)
+        if affected is None:
+            return False
+        affected_id = getattr(affected, "id", affected)
+        return affected_id not in corner_ids
 
     try:
-        signal.pause()  # blocks at ~0% CPU until a signal (e.g. Ctrl-C) arrives
-    except AttributeError:
-        # signal.pause() isn't available on every platform - fall back safely
-        try:
-            while True:
-                time.sleep(3600)
-        except KeyboardInterrupt:
-            pass
+        while True:
+            # next_event() sleeps on the X server socket; ~0% idle CPU.
+            event = xdpy.next_event()
+            if handle_stacking_event(event):
+                # Raise all four corners as one group. Their own ConfigureNotify
+                # events are ignored, preventing any self-induced raise loop.
+                for corner_window in windows:
+                    corner_window.configure(stack_mode=X.Above)
+                xdpy.flush()
     except KeyboardInterrupt:
         pass
-    sys.exit(0)
+    finally:
+        # Normal X11 resource teardown; avoid leaving orphaned black masks.
+        for corner_window in windows:
+            try:
+                corner_window.destroy()
+            except Exception:
+                pass
+        try:
+            xdpy.close()
+        except Exception:
+            pass
 
 
 # ══════════════════════════════════════════════════════════════════════════════
