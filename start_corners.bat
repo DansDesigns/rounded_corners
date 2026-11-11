@@ -1,21 +1,29 @@
 @echo off
-if not exist venv (
-    python -m venv venv
-)
-call venv\Scripts\activate
-pip install pillow screeninfo --quiet
+setlocal
+cd /d "%~dp0"
 
-:: Add to startup folder automatically (only once)
-set STARTUP=%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup
-set SHORTCUT=%STARTUP%\rounded_corners.lnk
-set SCRIPT_DIR=%~dp0
-
-if not exist "%SHORTCUT%" (
-    echo Creating startup shortcut...
-    powershell -Command "$ws = New-Object -ComObject WScript.Shell; $s = $ws.CreateShortcut('%SHORTCUT%'); $s.TargetPath = '%SCRIPT_DIR%start_corners.bat'; $s.WorkingDirectory = '%SCRIPT_DIR%'; $s.WindowStyle = 7; $s.Save()"
-    echo Startup shortcut created - will now run on every login!
+if not exist "venv\Scripts\python.exe" (
+    python -m venv "venv"
+    if errorlevel 1 exit /b 1
 )
 
-:: Use pythonw.exe to run with no terminal window
-:: The process will keep running even after this bat closes
-start "" venv\Scripts\pythonw.exe rounded_corners.py %*
+set "PYTHON=%~dp0venv\Scripts\python.exe"
+set "PYTHONW=%~dp0venv\Scripts\pythonw.exe"
+
+"%PYTHON%" -c "import PIL, screeninfo" >nul 2>&1
+if errorlevel 1 (
+    "%PYTHON%" -m pip install pillow screeninfo --quiet
+    if errorlevel 1 exit /b 1
+)
+
+rem Install/refresh Windows Start Menu settings shortcut, and the separate
+rem Startup overlay shortcut (only if enabled in saved settings).
+"%PYTHON%" "%~dp0rounded_corners.py" --install-shortcuts
+if errorlevel 1 exit /b 1
+
+rem Start the overlay if configured to run; the app blocks duplicate overlays.
+start "" "%PYTHONW%" "%~dp0rounded_corners.py" --overlay
+
+rem When launched manually, show settings instead of opening a second overlay.
+start "" "%PYTHONW%" "%~dp0rounded_corners.py" --settings
+endlocal
