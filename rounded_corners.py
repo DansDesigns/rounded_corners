@@ -121,10 +121,13 @@ def _windows_shortcut(path, command):
         return "'" + str(value).replace("'", "''") + "'"
 
     path.parent.mkdir(parents=True, exist_ok=True)
+    # Build the quoted argument separately: backslashes inside f-string
+    # expressions are invalid on Windows Python 3.11 and earlier.
+    shortcut_arguments = '"' + script_path() + '" ' + command
     script = ("$shell = New-Object -ComObject WScript.Shell; "
               f"$link = $shell.CreateShortcut({quoted(path)}); "
               f"$link.TargetPath = {quoted(python_command(background=True))}; "
-              f"$link.Arguments = {quoted('\"' + script_path() + '\" ' + command)}; "
+              f"$link.Arguments = {quoted(shortcut_arguments)}; "
               f"$link.WorkingDirectory = {quoted(str(Path(script_path()).parent))}; "
               "$link.WindowStyle = 7; $link.Save()")
     encoded = base64.b64encode(script.encode("utf-16le")).decode("ascii")
@@ -135,16 +138,102 @@ def _windows_shortcut(path, command):
         raise RuntimeError(result.stderr.strip() or "Unable to create Windows shortcut")
 
 
+def _is_rounded_corners_entry(contents):
+    """Recognise ONLY our own old/new .desktop entries before changing them."""
+    entries = {}
+    in_desktop_entry = False
+    for raw_line in contents.splitlines():
+        line = raw_line.strip()
+        if line.startswith("[") and line.endswith("]"):
+            in_desktop_entry = (line == "[Desktop Entry]")
+        elif in_desktop_entry and "=" in line and not line.startswith("#"):
+            key, value = line.split("=", 1)
+            entries[key.strip()] = value.strip()
+    command = entries.get("Exec", "")
+    # The old installer used `python3 /usr/bin/rounded_corners`.
+    # The new one uses `/usr/bin/rounded_corners --overlay` or --settings.
+    import re
+    return (entries.get("Name") == "Rounded Corners"
+            and bool(re.search(r"(?:^|[\s/])rounded_corners(?:\.py)?(?:\s|$)", command)))
+
+
+def _ensure_linux_autostart_dir():
+    """Migrate the legacy autostart *file* only if it belongs to Rounded Corners.
+
+    The original installer copied its .desktop file onto ~/.config/autostart,
+    creating a plain file where XDG expects a directory. Never remove or
+    replace an unrelated file. Keep the original legacy file as a backup.
+    """
+    directory = startup_path().parent
+    if directory.is_symlink():
+        raise RuntimeError(f"{directory} is a symbolic link; not changing it automatically")
+    if directory.is_dir():
+        return
+    if directory.exists():
+        if not directory.is_file():
+            raise RuntimeError(f"{directory} is not a directory or a regular file")
+        legacy_contents = directory.read_text(encoding="utf-8")
+        if not _is_rounded_corners_entry(legacy_contents):
+            raise RuntimeError(
+                f"{directory} is a file belonging to another application. "
+                "Rounded Corners will not replace it; please inspect it manually.")
+
+        backup = directory.with_name(directory.name + ".rounded_corners.legacy")
+        counter = 1
+        while backup.exists() or backup.is_symlink():
+            backup = directory.with_name(
+                directory.name + f".rounded_corners.legacy.{counter}")
+            counter += 1
+        directory.rename(backup)
+        try:
+            directory.mkdir(parents=True, exist_ok=False)
+        except OSError:
+            # Restore the original file if making the directory failed.
+            backup.rename(directory)
+            raise
+        print(f"Migrated old Rounded Corners autostart file to {backup}")
+        return
+    directory.mkdir(parents=True, exist_ok=True)
+
+
+def _update_desktop_entry(path, content):
+    """Keep an existing correct shortcut untouched; preserve unrelated files."""
+    if path.is_symlink():
+        raise RuntimeError(f"{path} is a symbolic link; not changing it automatically")
+    if path.exists():
+        if not path.is_file():
+            raise RuntimeError(f"{path} is not a normal desktop entry")
+        existing = path.read_text(encoding="utf-8")
+        if existing == content:
+            return
+        if not _is_rounded_corners_entry(existing):
+            raise RuntimeError(f"{path} is not a Rounded Corners entry; keeping it unchanged")
+    path.write_text(content, encoding="utf-8")
+
+
 def sync_startup(enabled):
     path = startup_path()
-    if not enabled:
-        path.unlink(missing_ok=True)
-        return
     if IS_WINDOWS:
-        _windows_shortcut(path, "--overlay")
-    else:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(_desktop_entry(overlay=True), encoding="utf-8")
+        if enabled:
+            _windows_shortcut(path, "--overlay")
+        else:
+            path.unlink(missing_ok=True)
+        return
+
+    directory = path.parent
+    # An old installer may have created a *file* at ~/.config/autostart.
+    # Even when startup is disabled we must safely migrate that old entry.
+    if enabled or directory.exists() or directory.is_symlink():
+        _ensure_linux_autostart_dir()
+    if enabled:
+        _update_desktop_entry(path, _desktop_entry(overlay=True))
+    elif path.is_symlink():
+        raise RuntimeError(f"{path} is a symbolic link; not changing it automatically")
+    elif path.exists():
+        contents = path.read_text(encoding="utf-8")
+        if not _is_rounded_corners_entry(contents):
+            raise RuntimeError(f"{path} does not belong to Rounded Corners; keeping it unchanged")
+        path.unlink()
 
 
 def install_shortcuts():
@@ -152,11 +241,14 @@ def install_shortcuts():
         base = Path(os.environ.get("APPDATA") or Path.home() / "AppData" / "Roaming")
         menu = base / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "Rounded Corners.lnk"
         _windows_shortcut(menu, "--settings")
+        sync_startup(load_settings()["start_on_boot"])
     else:
+        # Validate/migrate startup first so an obstructing file cannot leave
+        # a newly written app-menu shortcut pointing at an incomplete install.
+        sync_startup(load_settings()["start_on_boot"])
         menu = Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local" / "share") / "applications" / "rounded_corners.desktop"
         menu.parent.mkdir(parents=True, exist_ok=True)
-        menu.write_text(_desktop_entry(overlay=False), encoding="utf-8")
-    sync_startup(load_settings()["start_on_boot"])
+        _update_desktop_entry(menu, _desktop_entry(overlay=False))
 
 
 def _spawn_overlay():
@@ -710,7 +802,11 @@ def main():
     args = parser.parse_args()
 
     if args.install_shortcuts:
-        install_shortcuts()
+        try:
+            install_shortcuts()
+        except (OSError, RuntimeError, UnicodeError) as exc:
+            print(f"ERROR: Rounded Corners shortcut setup failed: {exc}", file=sys.stderr)
+            sys.exit(1)
         return
     if args.settings:
         show_settings()
