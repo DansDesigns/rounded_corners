@@ -86,6 +86,12 @@ def script_path():
 
 
 def python_command(background=False):
+    # The installed Linux app is system-wide. Never put the interpreter from
+    # a temporary build/Qtile virtualenv into a .desktop file copied to
+    # /etc/skel: it would point at /root and fail for ordinary users.
+    # Source-tree and Windows runs keep their actual interpreter.
+    if not IS_WINDOWS and Path(script_path()) == Path("/usr/bin/rounded_corners"):
+        return "/usr/bin/python3"
     exe = Path(sys.executable)
     if IS_WINDOWS and background:
         hidden = exe.with_name("pythonw.exe")
