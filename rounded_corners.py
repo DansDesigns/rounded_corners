@@ -7,8 +7,8 @@ Always on top, variable arc radius - identical to the macOS corner effect.
 
 Windows : uses tkinter + transparentcolor and a Win32 window-stacking event hook.
 Linux   : uses raw Xlib + the X SHAPE extension, in a single lightweight process.
-          The corner masks remain static, but stacking events immediately return
-          them to the top if Freehand or another overlay raises itself.
+          XRandR changes update monitor placement, while stacking events
+          return the masks to the top when another overlay is raised.
           No pygame/SDL2 or continuous repaint loop.
 
 Requirements:
@@ -444,10 +444,128 @@ except ImportError:
 try:
     from screeninfo import get_monitors as _si_monitors
     def get_monitors():
-        return [(m.x, m.y, m.width, m.height) for m in _si_monitors()]
+        try:
+            return [(m.x, m.y, m.width, m.height) for m in _si_monitors()]
+        except Exception:  # Screen layout may be briefly unavailable during rotation.
+            return None
 except ImportError:
     def get_monitors():
         return None
+
+
+# Refresh only when the monitor geometry changes; checking is not redrawing.
+MONITOR_CHECK_SECONDS = 1.0
+
+
+def _normalise_monitors(monitors):
+    """Canonical (x, y, width, height) list for topology-change comparison."""
+    result = set()
+    for monitor in monitors or ():
+        try:
+            x, y, width, height = (int(value) for value in monitor)
+            if width > 0 and height > 0:
+                result.add((x, y, width, height))
+        except (TypeError, ValueError, OverflowError):
+            continue
+    return tuple(sorted(result))
+
+
+def _windows_monitors():
+    """Query Win32 on every check, including rotated and negative-origin screens."""
+    import ctypes
+    from ctypes import wintypes
+
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    callback_type = ctypes.WINFUNCTYPE(
+        wintypes.BOOL, wintypes.HANDLE, wintypes.HDC,
+        ctypes.POINTER(wintypes.RECT), wintypes.LPARAM)
+    user32.EnumDisplayMonitors.argtypes = (
+        wintypes.HDC, ctypes.c_void_p, callback_type, wintypes.LPARAM)
+    user32.EnumDisplayMonitors.restype = wintypes.BOOL
+    monitors = []
+
+    @callback_type
+    def collect(_monitor, _dc, rectangle, _data):
+        rect = rectangle.contents
+        monitors.append((rect.left, rect.top,
+                         rect.right - rect.left, rect.bottom - rect.top))
+        return True
+
+    if not user32.EnumDisplayMonitors(None, None, collect, 0):
+        return ()
+    return _normalise_monitors(monitors)
+
+
+def _linux_monitors(xdpy, root):
+    """Read active XRandR CRTCs, so geometry reflects a rotation immediately.
+
+    None means RandR was unavailable; an empty tuple means the server is
+    temporarily between display configurations and should be checked again.
+    """
+    try:
+        if not xdpy.has_extension("RANDR"):
+            return None
+        if hasattr(root, "xrandr_get_screen_resources_current"):
+            resources = root.xrandr_get_screen_resources_current()
+        else:
+            resources = root.xrandr_get_screen_resources()
+        monitors = []
+        for crtc in resources.crtcs:
+            info = xdpy.xrandr_get_crtc_info(crtc, resources.config_timestamp)
+            if info.mode and info.width > 0 and info.height > 0:
+                monitors.append((info.x, info.y, info.width, info.height))
+        return _normalise_monitors(monitors)
+    except Exception:
+        # A CRTC may disappear between fetching the resources and its info.
+        # Keep the last good layout until a later event/poll can read it.
+        return None
+
+
+def _fallback_linux_monitors(root=None):
+    """Fallback for desktops without a working RandR query interface."""
+    monitors = get_monitors()
+    if monitors:
+        return _normalise_monitors(monitors)
+    try:
+        # xrandr --listmonitors includes per-monitor positions and rotations.
+        # Avoid parsing xrandr --query mode lines as extra monitors.
+        import re
+        output = subprocess.check_output(
+            ["xrandr", "--listmonitors"], text=True,
+            stderr=subprocess.DEVNULL, timeout=3)
+        monitors = []
+        for line in output.splitlines()[1:]:
+            match = re.search(r"(\d+)/\d+x(\d+)/\d+([+-]\d+)([+-]\d+)", line)
+            if match:
+                width, height, x, y = (int(value) for value in match.groups())
+                monitors.append((x, y, width, height))
+        if monitors:
+            return _normalise_monitors(monitors)
+    except (OSError, subprocess.SubprocessError, ValueError):
+        pass
+    if root is not None:
+        try:
+            geometry = root.get_geometry()
+            return _normalise_monitors([(0, 0, geometry.width, geometry.height)])
+        except Exception:
+            pass
+    return ()
+
+
+def _enable_windows_dpi_awareness():
+    """Make Win32 physical monitor rectangles agree with Tk pixel positions."""
+    try:
+        import ctypes
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        # Per-monitor V2; fall back for older Windows versions.
+        if user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4)):
+            return
+    except (OSError, AttributeError):
+        pass
+    try:
+        ctypes.WinDLL("user32").SetProcessDPIAware()
+    except (OSError, AttributeError):
+        pass
 
 
 # ======================= shared image builder =======================
@@ -497,15 +615,28 @@ def run_windows(monitors, arc):
     root.withdraw()
 
     all_wins = []
+    current_layout = _normalise_monitors(monitors)
+    try:
+        current_layout = _windows_monitors() or current_layout
+    except (OSError, AttributeError):
+        pass
+    photos = {}
 
-    def create_corners(new_arc):
+    def create_corners(new_arc, new_layout):
+        nonlocal photos
         for win in all_wins:
             try:
                 win.destroy()
             except tk.TclError:
                 pass
         all_wins.clear()
-        for (mx, my, mw, mh) in monitors:
+        # Reuse pre-rendered corner images when only monitor geometry changed.
+        if not photos or new_arc != current_photo_arc[0]:
+            photos = {key: make_photo(new_arc, key)
+                      for key in ("tl", "tr", "bl", "br")}
+            current_photo_arc[0] = new_arc
+        negative_positions = []
+        for (mx, my, mw, mh) in new_layout:
             positions = {
                 "tl": (mx,              my),
                 "tr": (mx + mw - new_arc, my),
@@ -513,21 +644,41 @@ def run_windows(monitors, arc):
                 "br": (mx + mw - new_arc, my + mh - new_arc),
             }
             for key, (wx, wy) in positions.items():
-                photo = make_photo(new_arc, key)
                 win = tk.Toplevel(root)
                 win.overrideredirect(True)
                 win.attributes("-topmost", True)
-                win.geometry(f"{new_arc}x{new_arc}+{wx}+{wy}")
+                # Negative Tk geometry coordinates are relative to the right
+                # edge; place those windows with absolute Win32 coordinates.
+                if wx < 0 or wy < 0:
+                    win.geometry(f"{new_arc}x{new_arc}+0+0")
+                    negative_positions.append((win, wx, wy))
+                else:
+                    win.geometry(f"{new_arc}x{new_arc}+{wx}+{wy}")
                 win.attributes("-transparentcolor", TKEY)
                 win.configure(bg=TKEY)
                 canvas = tk.Canvas(win, width=new_arc, height=new_arc,
                                    bg=TKEY, highlightthickness=0)
                 canvas.pack()
-                canvas.create_image(0, 0, anchor="nw", image=photo)
-                canvas._ref = photo
+                canvas.create_image(0, 0, anchor="nw", image=photos[key])
                 all_wins.append(win)
+        if negative_positions:
+            import ctypes
+            from ctypes import wintypes
+            user32 = ctypes.WinDLL("user32", use_last_error=True)
+            user32.GetAncestor.argtypes = (wintypes.HWND, wintypes.UINT)
+            user32.GetAncestor.restype = wintypes.HWND
+            user32.SetWindowPos.argtypes = (
+                wintypes.HWND, wintypes.HWND, ctypes.c_int, ctypes.c_int,
+                ctypes.c_int, ctypes.c_int, wintypes.UINT)
+            user32.SetWindowPos.restype = wintypes.BOOL
+            root.update_idletasks()
+            for win, wx, wy in negative_positions:
+                hwnd = user32.GetAncestor(win.winfo_id(), 2) or win.winfo_id()
+                user32.SetWindowPos(hwnd, -1, wx, wy, new_arc, new_arc,
+                                     0x0010 | 0x0040)  # NOACTIVATE | SHOWWINDOW
 
-    create_corners(arc)
+    current_photo_arc = [None]
+    create_corners(arc, current_layout)
 
     # Freehand (and other apps) can call SetWindowPos(HWND_TOPMOST) every
     # fraction of a second. A 2-second poll makes the masks visibly disappear.
@@ -602,10 +753,12 @@ def run_windows(monitors, arc):
 
     last_stamp = settings_stamp()
     current_arc = arc
+    last_monitor_check = time.monotonic()
 
     def check_settings():
-        nonlocal last_stamp, current_arc
+        nonlocal last_stamp, current_arc, current_layout, last_monitor_check
         stamp = settings_stamp()
+        rebuild = False
         if stamp != last_stamp:
             last_stamp = stamp
             updated = load_settings()
@@ -614,7 +767,21 @@ def run_windows(monitors, arc):
                 return
             if updated["arc"] != current_arc:
                 current_arc = updated["arc"]
-                create_corners(current_arc)
+                rebuild = True
+
+        # EnumDisplayMonitors is lightweight; no redraw if nothing changed.
+        now = time.monotonic()
+        if now - last_monitor_check >= MONITOR_CHECK_SECONDS:
+            last_monitor_check = now
+            try:
+                layout = _windows_monitors()
+                if layout and layout != current_layout:
+                    current_layout = layout
+                    rebuild = True
+            except (OSError, AttributeError):
+                pass  # Display temporarily unavailable during a mode switch.
+        if rebuild:
+            create_corners(current_arc, current_layout)
         root.after(350, check_settings)
 
     root.after(350, check_settings)
@@ -677,24 +844,30 @@ def run_linux(monitors, arc):
 
     windows = []
     masks = {}
+    masks_arc = None
+    current_layout = _linux_monitors(xdpy, root)
+    if not current_layout:
+        current_layout = _normalise_monitors(monitors) or _fallback_linux_monitors(root)
 
-    def create_corners(new_arc):
-        nonlocal masks
+    def create_corners(new_arc, new_layout):
+        nonlocal masks, masks_arc
         for win in windows:
             try:
                 win.destroy()
             except Exception:
                 pass
         windows.clear()
-        for mask in masks.values():
-            try:
-                mask.free()
-            except Exception:
-                pass
-        masks = {c: _build_shape_mask(root, new_arc, c)
-                 for c in ("tl", "tr", "bl", "br")}
+        if masks_arc != new_arc:
+            for mask in masks.values():
+                try:
+                    mask.free()
+                except Exception:
+                    pass
+            masks = {c: _build_shape_mask(root, new_arc, c)
+                     for c in ("tl", "tr", "bl", "br")}
+            masks_arc = new_arc
 
-        for (mx, my, mw, mh) in monitors:
+        for (mx, my, mw, mh) in new_layout:
             positions = {
                 "tl": (mx,                  my),
                 "tr": (mx + mw - new_arc,  my),
@@ -724,14 +897,27 @@ def run_linux(monitors, arc):
                 windows.append(win)
         xdpy.sync()
 
-    create_corners(arc)
+    create_corners(arc, current_layout)
 
     # Subscribe to restacks of TOP-LEVEL X11 windows. In particular, Freehand
     # uses XRaiseWindow about eight times a second to remain visible above
     # Alternix's launcher; without this listener it ends up covering the corner
     # masks. X11 reports each foreign restack as ConfigureNotify on the root.
     # Selecting this mask is per-client and does not interfere with Qtile's masks.
-    root.change_attributes(event_mask=X.SubstructureNotifyMask)
+    root.change_attributes(event_mask=X.SubstructureNotifyMask | X.StructureNotifyMask)
+    # XRandR reports display rotation, resize, and (dis)connection immediately.
+    # Keep a low-frequency fallback check for drivers which omit events.
+    randr_enabled = False
+    try:
+        from Xlib.ext import randr
+        if xdpy.has_extension("RANDR"):
+            root.xrandr_select_input(
+                randr.RRScreenChangeNotifyMask |
+                randr.RRCrtcChangeNotifyMask |
+                randr.RROutputChangeNotifyMask)
+            randr_enabled = True
+    except Exception:
+        pass
     corner_ids = {win.id for win in windows}
     xdpy.sync()
     print(f"\n{len(windows)} rounded corner masks active above desktop overlays "
@@ -750,17 +936,43 @@ def run_linux(monitors, arc):
     import select
     current_arc = arc
     last_stamp = settings_stamp()
+    next_monitor_check = time.monotonic() + MONITOR_CHECK_SECONDS
     try:
         while True:
-            # Listen for X11 restacks while also checking for settings edits.
-            # select() sleeps between events: no continuous repainting.
+            # Wait on the X11 socket; monitor checks do not repaint the masks.
             select.select([xdpy.fileno()], [], [], .35)
+            layout_dirty = False
+            restack = False
             while xdpy.pending_events():
                 event = xdpy.next_event()
-                if handle_stacking_event(event):
-                    for corner_window in windows:
-                        corner_window.configure(stack_mode=X.Above)
-                    xdpy.flush()
+                if randr_enabled and isinstance(event, (
+                        randr.ScreenChangeNotify,
+                        randr.CrtcChangeNotify,
+                        randr.OutputChangeNotify)):
+                    layout_dirty = True
+                elif event.type == X.ConfigureNotify and (
+                        getattr(getattr(event, "window", None), "id", None) == root.id):
+                    layout_dirty = True
+                elif handle_stacking_event(event):
+                    restack = True
+            if restack:
+                for corner_window in windows:
+                    corner_window.configure(stack_mode=X.Above)
+                xdpy.flush()
+
+            now = time.monotonic()
+            rebuild = False
+            if layout_dirty or now >= next_monitor_check:
+                next_monitor_check = now + MONITOR_CHECK_SECONDS
+                layout = _linux_monitors(xdpy, root)
+                if not layout:
+                    # Some RandR servers (e.g. Xvfb) have no exposed CRTCs.
+                    # The root size still changes on a resolution switch.
+                    layout = _fallback_linux_monitors(root)
+                # Ignore a transient empty layout during output reconfiguration.
+                if layout and layout != current_layout:
+                    current_layout = layout
+                    rebuild = True
 
             stamp = settings_stamp()
             if stamp != last_stamp:
@@ -770,8 +982,10 @@ def run_linux(monitors, arc):
                     break
                 if updated["arc"] != current_arc:
                     current_arc = updated["arc"]
-                    create_corners(current_arc)
-                    corner_ids = {win.id for win in windows}
+                    rebuild = True
+            if rebuild:
+                create_corners(current_arc, current_layout)
+                corner_ids = {win.id for win in windows}
     except KeyboardInterrupt:
         pass
     finally:
@@ -830,23 +1044,21 @@ def main():
     print(f"Rounded corners overlay | arc = {arc} px | "
           f"{'Windows' if IS_WINDOWS else 'Linux'}")
 
-    monitors = get_monitors()
-    if not monitors:
-        if IS_WINDOWS:
-            import tkinter as tk
-            root = tk.Tk()
-            root.withdraw()
-            monitors = [(0, 0, root.winfo_screenwidth(), root.winfo_screenheight())]
-            root.destroy()
-        else:
-            import re
-            try:
-                out = subprocess.check_output(["xrandr"], text=True)
-                monitors = [(int(x), int(y), int(w), int(h))
-                            for w, h, x, y in re.findall(
-                                r"(\d+)x(\d+)\+(\d+)\+(\d+)", out)]
-            except Exception:
-                monitors = [(0, 0, 1920, 1080)]
+    if IS_WINDOWS:
+        _enable_windows_dpi_awareness()
+        try:
+            monitors = _windows_monitors()
+        except (OSError, AttributeError):
+            monitors = ()
+        if not monitors:
+            monitors = _normalise_monitors(get_monitors())
+        if not monitors:
+            import ctypes
+            user32 = ctypes.WinDLL("user32", use_last_error=True)
+            monitors = ((user32.GetSystemMetrics(76), user32.GetSystemMetrics(77),
+                         user32.GetSystemMetrics(78), user32.GetSystemMetrics(79)),)
+    else:
+        monitors = _fallback_linux_monitors()
 
     try:
         if IS_WINDOWS:
